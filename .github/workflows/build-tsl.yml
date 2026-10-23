@@ -1,0 +1,86 @@
+name: Build & Release (TrollStore Lite Backend)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  THEOS: ""
+  VERSION: "0.0.0-0"
+
+jobs:
+  fetch-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4.1.1
+
+      - name: Install Dependencies
+        run: |
+          echo /usr/local/opt/make/libexec/gnubin >> $GITHUB_PATH
+          echo /opt/homebrew/opt/make/libexec/gnubin >> $GITHUB_PATH
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew install dpkg ldid-procursus make xcbeautify openssl@3
+          VERSION_FILE="TrollFools/Version.xcconfig"
+          VERSION_MAIN=$(grep "VERSION" $VERSION_FILE | cut -d'=' -f2 | tr -d '[:space:]')
+          VERSION_BUILD=$(grep "BUILD_NUMBER" $VERSION_FILE | cut -d'=' -f2 | tr -d '[:space:]')
+          VERSION=$VERSION_MAIN-$VERSION_BUILD
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Version: $VERSION"
+
+      - name: Checkout THEOS
+        uses: actions/checkout@v4.1.1
+        with:
+          repository: theos/theos
+          ref: 942cd0c015f93d8c2d714ba0c69e7f420157c382
+          path: theos
+          submodules: recursive
+
+      - name: Add THEOS environment variables
+        run: |
+          rm -rf $GITHUB_WORKSPACE/theos/sdks
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> $GITHUB_ENV
+          echo "THEOS_PACKAGE_SCHEME=rootless" >> $GITHUB_ENV
+          echo "FINALPACKAGE=1" >> $GITHUB_ENV
+
+      - name: Checkout SDKs
+        uses: actions/checkout@v4.1.1
+        with:
+          repository: theos/sdks
+          ref: master
+          path: ${{ env.THEOS }}/sdks
+
+      - name: Verify Patch Files
+        run: |
+          test -f TrollFools/InjectorV3+TrollStoreLite.swift && echo "TSL backend OK"
+          grep -q "TrollStoreLiteBackend" TrollFools/InjectorV3+Inject.swift && echo "Inject branch OK"
+          grep -q "TrollStoreLiteBackend" TrollFools/InjectorV3+Eject.swift && echo "Eject branch OK"
+          grep -q "TrollStoreLiteBackend" TrollFools/InjectorV3+Bundle.swift && echo "Bundle branch OK"
+          grep -q "InjectorV3+TrollStoreLite.swift" TrollFools.xcodeproj/project.pbxproj && echo "pbxproj registration OK"
+
+      - name: Build Packages
+        run: |
+          make package
+          cp packages/*.tipa packages/*.deb . 2>/dev/null || true
+          find .theos/obj -name "*.dSYM" -exec cp -r {} . \;
+          ls -la
+          echo "--- packages ---"
+          ls -la packages/ 2>/dev/null || true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollFools-TSL-${{ env.VERSION }}
+          path: |
+            *.tipa
+            *.deb
+            *.dSYM
