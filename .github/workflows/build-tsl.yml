@@ -67,6 +67,11 @@ jobs:
           grep -q "TrollStoreLiteBackend" TrollFools/InjectorV3+Bundle.swift && echo "Bundle branch OK"
           grep -q "InjectorV3+TrollStoreLite.swift" TrollFools.xcodeproj/project.pbxproj && echo "pbxproj registration OK"
 
+      - name: Fix Script Permissions
+        run: |
+          chmod +x devkit/*.sh
+          echo "devkit scripts made executable"
+
       - name: Build Packages
         run: |
           make package
