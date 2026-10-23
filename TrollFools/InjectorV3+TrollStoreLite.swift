@@ -108,15 +108,78 @@ final class TrollStoreLiteBackend {
 
     // MARK: - 清单
 
-    /// 巨魔R：/var/mobile/Library/GMLiteInjection/InjectedDylibs.plist
+    /// 巨魔R：/var/mobile/Library/GMLiteInjection/<appId>/InjectedDylibs.plist
+    /// （appId 经 sanitize，形如 GMLite-<hex>-<bundleID> 或直接 bundleID）
     static func manifestURL() -> URL? {
         URL(fileURLWithPath: "/var/mobile")
             .appendingPathComponent(gmliteRootRelative)
             .appendingPathComponent(manifestFileName)
     }
 
+    /// 定位某个 App 的注入清单。巨魔R 把清单放在按 appId 分组的目录下，
+    /// 而不是单一全局文件；找不到 appId 目录时回退到全局清单兼容旧版。
+    static func manifestURL(for bundleURL: URL) -> URL? {
+        let fallback = manifestURL()
+
+        guard let appID = appIdentifierForBundle(bundleURL), !appID.isEmpty else {
+            return fallback
+        }
+
+        // 候选目录：<root>/<appID>/InjectedDylibs.plist，appID 先尝试原样，
+        // 失败再尝试 sanitize（巨魔R 内部用 sanitizedInjectionPathComponent）。
+        let candidates = [
+            URL(fileURLWithPath: "/var/mobile")
+                .appendingPathComponent(gmliteRootRelative)
+                .appendingPathComponent(appID)
+                .appendingPathComponent(manifestFileName),
+            URL(fileURLWithPath: "/var/mobile")
+                .appendingPathComponent(gmliteRootRelative)
+                .appendingPathComponent(sanitizedPathComponent(appID))
+                .appendingPathComponent(manifestFileName),
+        ]
+
+        for url in candidates {
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return fallback
+    }
+
+    /// 从 App bundle 解析 bundle identifier（Info.plist CFBundleIdentifier）。
+    static func appIdentifierForBundle(_ bundleURL: URL) -> String? {
+        let infoURL = bundleURL.appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: infoURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = plist as? [String: Any],
+              let bid = dict["CFBundleIdentifier"] as? String
+        else {
+            return nil
+        }
+        return bid
+    }
+
+    /// 巨魔R sanitize：替换路径分隔符等非法字符（字母数字 . _ - 之外 → _）。
+    static func sanitizedPathComponent(_ component: String) -> String {
+        var out = ""
+        for scalar in component.unicodeScalars {
+            let c = Character(scalar)
+            if c.isLetter || c.isNumber || c == "." || c == "_" || c == "-" {
+                out.append(c)
+            } else {
+                out.append("_")
+            }
+        }
+        return out
+    }
+
     static func parseManifest() -> [TrollStoreLiteInjectionEntry] {
-        guard let manifestURL = manifestURL(),
+        parseManifest(for: nil)
+    }
+
+    static func parseManifest(for bundleURL: URL?) -> [TrollStoreLiteInjectionEntry] {
+        let manifestURL: URL? = bundleURL.flatMap { self.manifestURL(for: $0) } ?? self.manifestURL()
+        guard let manifestURL,
               let data = try? Data(contentsOf: manifestURL),
               let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
               let dict = plist as? [String: Any]
@@ -151,7 +214,7 @@ final class TrollStoreLiteBackend {
         var result: [URL] = []
         var seen = Set<String>()
 
-        for entry in parseManifest() where entry.path.hasPrefix("/") {
+        for entry in parseManifest(for: bundleURL) where entry.path.hasPrefix("/") {
             let url = URL(fileURLWithPath: entry.path)
             if seen.insert(url.path).inserted {
                 result.append(url)
@@ -174,6 +237,24 @@ final class TrollStoreLiteBackend {
     }
 
     // MARK: - 运行
+
+    /// 切换已注入 dylib 的启用状态（巨魔R 扩展子命令）。
+    /// 巨魔R 的清单在 app 内（InjectedDylibs.plist 中存储启用位），
+    /// TrollFools 开关必须直接驱动 helper，而不是重复 inject/eject。
+    @discardableResult
+    static func setInjectedDylibEnabled(
+        helperURL: URL,
+        appPath: String,
+        dylibName: String,
+        enabled: Bool
+    ) throws -> Int32 {
+        try spawn(helperURL, arguments: [
+            "set-injected-dylib-enabled",
+            appPath,
+            dylibName,
+            enabled ? "1" : "0",
+        ])
+    }
 
     @discardableResult
     static func spawn(

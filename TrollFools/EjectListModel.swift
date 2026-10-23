@@ -36,8 +36,17 @@ final class EjectListModel: ObservableObject {
 
     func reload() {
         var plugIns = [InjectedPlugIn]()
+        // TrollStore Lite / 巨魔R 后端：按 app 清单解析真实启用状态，
+        // 而不是把所有已注入 dylib 一律标为已启用。
+        let entries = TrollStoreLiteBackend.parseManifest(for: app.url)
+        var entryEnabledByName: [String: Bool] = [:]
+        for entry in entries {
+            // 兼容两种 key 形态：绝对路径或纯文件名（helper 内部按 dylib 名匹配）。
+            entryEnabledByName[URL(fileURLWithPath: entry.path).lastPathComponent] = entry.enabled
+        }
+
         plugIns += InjectorV3.main.injectedAssetURLsInBundle(app.url)
-            .map { InjectedPlugIn(url: $0, isEnabled: true) }
+            .map { InjectedPlugIn(url: $0, isEnabled: entryEnabledByName[$0.lastPathComponent] ?? true) }
 
         let enabledNames = plugIns.map { $0.url.lastPathComponent }
         plugIns += InjectorV3.main.persistedAssetURLs(bid: app.bid)

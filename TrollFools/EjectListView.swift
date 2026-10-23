@@ -408,7 +408,31 @@ struct EjectListView: View {
             injector.useFrameworkEnumerationFallback = useFrameworkEnumerationFallback
             injector.injectStrategy = injectStrategy
 
-            if plugIn.isEnabled {
+            if injector.shouldUseTrollStoreLiteBackend,
+               plugIn.url.pathExtension.lowercased() == "dylib" {
+                // TrollStore Lite / 巨魔R 后端：启用/禁用直接驱动 helper 的
+                // set-injected-dylib-enabled 子命令，而不是重复 inject/eject。
+                let manifestNames = Set(
+                    TrollStoreLiteBackend.parseManifest(for: ejectList.app.url)
+                        .map { URL(fileURLWithPath: $0.path).lastPathComponent }
+                )
+                if manifestNames.contains(plugIn.url.lastPathComponent) {
+                    // 已在巨魔R 清单：直接切换启用位。
+                    guard let helperURL = TrollStoreLiteBackend.resolveHelperURL() else {
+                        throw TrollStoreLiteError.helperUnavailable
+                    }
+                    try TrollStoreLiteBackend.setInjectedDylibEnabled(
+                        helperURL: helperURL,
+                        appPath: ejectList.app.url.path,
+                        dylibName: plugIn.url.lastPathComponent,
+                        enabled: !plugIn.isEnabled
+                    )
+                } else if plugIn.isEnabled {
+                    try injector.eject(plugInURLsToProcess, shouldDesist: false)
+                } else {
+                    try injector.inject(plugInURLsToProcess, shouldPersist: false)
+                }
+            } else if plugIn.isEnabled {
                 try injector.eject(plugInURLsToProcess, shouldDesist: false)
             } else {
                 try injector.inject(plugInURLsToProcess, shouldPersist: false)
@@ -482,7 +506,12 @@ struct EjectListView: View {
                 }
 
                 do {
-                    try injector.inject(disabledPlugInURLs, shouldPersist: false)
+                    if injector.shouldUseTrollStoreLiteBackend {
+                        // 巨魔R 后端：逐项把启用位打开，而不是重复 inject。
+                        try setAllTrollStoreLiteEnabled(disabledPlugInURLs, enabled: true, appPath: injector.bundleURL.path)
+                    } else {
+                        try injector.inject(disabledPlugInURLs, shouldPersist: false)
+                    }
                 } catch {
                     DispatchQueue.main.async {
                         DDLogError("\(error)", ddlog: InjectorV3.main.logger)
@@ -509,7 +538,104 @@ struct EjectListView: View {
     }
 
     private func disableAll() {
-        deleteAll(shouldDesist: false)
+        // TrollStore Lite / 巨魔R 后端：“全部禁用”= 逐项关掉启用位，
+        // 而不是删除注入（删除走 deleteAll / eject-all）。
+        let enabledPlugInURLs = ejectList.injectedPlugIns
+            .filter { $0.isEnabled }
+            .map { $0.url }
+
+        var logFileURL: URL?
+
+        do {
+            let injector = try InjectorV3(ejectList.app.url)
+            logFileURL = injector.latestLogFileURL
+
+            if injector.appID.isEmpty {
+                injector.appID = ejectList.app.bid
+            }
+
+            if injector.teamID.isEmpty {
+                injector.teamID = ejectList.app.teamID
+            }
+
+            injector.useWeakReference = useWeakReference
+            injector.preferMainExecutable = preferMainExecutable
+            injector.useFrameworkEnumerationFallback = useFrameworkEnumerationFallback
+            injector.injectStrategy = injectStrategy
+
+            let view = viewControllerHost.viewController?
+                .navigationController?.view
+
+            view?.isUserInteractionEnabled = false
+
+            isEnablingAll = false
+            isDisablingAll = !injector.shouldUseTrollStoreLiteBackend
+            isDeletingAll = false
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer {
+                    DispatchQueue.main.async {
+                        ejectList.app.reload()
+                        ejectList.reload()
+
+                        isEnablingAll = false
+                        isDisablingAll = false
+                        isDeletingAll = false
+
+                        view?.isUserInteractionEnabled = true
+                    }
+                }
+
+                do {
+                    if injector.shouldUseTrollStoreLiteBackend {
+                        try setAllTrollStoreLiteEnabled(enabledPlugInURLs, enabled: false, appPath: injector.bundleURL.path)
+                    } else {
+                        try injector.ejectAll(shouldDesist: false)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        DDLogError("\(error)", ddlog: InjectorV3.main.logger)
+
+                        var userInfo: [String: Any] = [
+                            NSLocalizedDescriptionKey: error.localizedDescription,
+                        ]
+
+                        if let logFileURL {
+                            userInfo[NSURLErrorKey] = logFileURL
+                        }
+
+                        let nsErr = NSError(domain: Constants.gErrorDomain, code: 0, userInfo: userInfo)
+
+                        lastError = nsErr
+                        isErrorOccurred = true
+                    }
+                }
+            }
+        } catch {
+            lastError = error
+            isErrorOccurred = true
+        }
+    }
+
+    private func setAllTrollStoreLiteEnabled(
+        _ urls: [URL],
+        enabled: Bool,
+        appPath: String
+    ) throws {
+        guard !urls.isEmpty else {
+            return
+        }
+        guard let helperURL = TrollStoreLiteBackend.resolveHelperURL() else {
+            throw TrollStoreLiteError.helperUnavailable
+        }
+        for url in urls {
+            try TrollStoreLiteBackend.setInjectedDylibEnabled(
+                helperURL: helperURL,
+                appPath: appPath,
+                dylibName: url.lastPathComponent,
+                enabled: enabled
+            )
+        }
     }
 
     private func deleteAll(shouldDesist: Bool) {
